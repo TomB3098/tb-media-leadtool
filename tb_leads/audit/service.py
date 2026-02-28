@@ -6,6 +6,7 @@ from tb_leads.audit.cta_checks import detect_contact_signals
 from tb_leads.audit.pagespeed_client import fetch_pagespeed
 from tb_leads.audit.seo_checks import seo_score_from_html
 from tb_leads.audit.website_probe import probe_website
+from tb_leads.enrich.contact_enrichment import enrich_contact_data
 
 
 def run_audit(website_url: str | None, page_speed_api_key: str | None, strategy: str = "mobile") -> dict[str, Any]:
@@ -21,6 +22,8 @@ def run_audit(website_url: str | None, page_speed_api_key: str | None, strategy:
         response_time_ms=probe.get("response_time_ms"),
     )
 
+    enrichment = enrich_contact_data(website_url)
+
     # Tech health rough aggregation 0..100
     tech_health = int(
         (ps.get("mobile_pagespeed_score", 0) * 0.5)
@@ -29,6 +32,9 @@ def run_audit(website_url: str | None, page_speed_api_key: str | None, strategy:
         + (5 if has_cta else 0)
     )
     tech_health = max(0, min(100, tech_health))
+
+    warnings = list(probe.get("warnings", []))
+    warnings.extend(enrichment.warnings)
 
     return {
         "website_present": bool(probe.get("website_present")),
@@ -41,5 +47,9 @@ def run_audit(website_url: str | None, page_speed_api_key: str | None, strategy:
         "has_contact_cta": has_cta,
         "has_contact_form": has_form,
         "tech_health_score": tech_health,
-        "warnings": probe.get("warnings", []),
+        "warnings": warnings,
+        "enriched_email": enrichment.email,
+        "enriched_address": enrichment.address,
+        "enriched_contact_source_url": enrichment.source_url,
+        "enrichment_pages_checked": enrichment.pages_checked,
     }

@@ -4,7 +4,7 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -36,11 +36,14 @@ class CompanyRecord:
     city: str
     postal_code: str | None
     address: str | None
+    address_enriched: str | None
     website_url: str | None
     website_domain: str | None
     phone: str | None
+    email: str | None
     source_primary: str
     source_ref: str | None
+    contact_source_url: str | None
 
 
 class Repository:
@@ -114,7 +117,6 @@ class Repository:
         website_url = payload.get("website_url")
         website_domain = domain_of(website_url)
         n_name = normalize_name(name)
-
         domain_norm = website_domain or ""
 
         with self._conn() as conn:
@@ -128,11 +130,17 @@ class Repository:
             row = cur.fetchone()
             if row:
                 company_id = row["id"]
+                enrichment_present = any(payload.get(k) for k in ("email", "address_enriched", "contact_source_url"))
                 conn.execute(
                     """
                     UPDATE companies
                     SET industry=?, postal_code=?, address=?, website_url=?, website_domain=?, website_domain_norm=?,
-                        phone=?, source_primary=?, source_ref=?, updated_at=?
+                        phone=?,
+                        email=COALESCE(?, email),
+                        address_enriched=COALESCE(?, address_enriched),
+                        contact_source_url=COALESCE(?, contact_source_url),
+                        enrichment_updated_at=CASE WHEN ? THEN ? ELSE enrichment_updated_at END,
+                        source_primary=?, source_ref=?, updated_at=?
                     WHERE id=?
                     """,
                     (
@@ -143,6 +151,11 @@ class Repository:
                         website_domain,
                         domain_norm,
                         payload.get("phone"),
+                        payload.get("email"),
+                        payload.get("address_enriched"),
+                        payload.get("contact_source_url"),
+                        1 if enrichment_present else 0,
+                        utcnow_iso(),
                         payload.get("source_primary", "unknown"),
                         payload.get("source_ref"),
                         utcnow_iso(),
@@ -151,13 +164,15 @@ class Repository:
                 )
             else:
                 company_id = str(uuid.uuid4())
+                enrichment_present = any(payload.get(k) for k in ("email", "address_enriched", "contact_source_url"))
                 conn.execute(
                     """
                     INSERT INTO companies(
                       id, name, name_normalized, industry, city, postal_code, address,
-                      website_url, website_domain, website_domain_norm, phone, source_primary, source_ref,
-                      is_public_b2b, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                      website_url, website_domain, website_domain_norm, phone,
+                      email, address_enriched, contact_source_url, enrichment_updated_at,
+                      source_primary, source_ref, is_public_b2b, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
                     (
                         company_id,
@@ -171,6 +186,10 @@ class Repository:
                         website_domain,
                         domain_norm,
                         payload.get("phone"),
+                        payload.get("email"),
+                        payload.get("address_enriched"),
+                        payload.get("contact_source_url"),
+                        utcnow_iso() if enrichment_present else None,
                         payload.get("source_primary", "unknown"),
                         payload.get("source_ref"),
                         utcnow_iso(),
@@ -179,6 +198,31 @@ class Repository:
                 )
             conn.commit()
         return company_id
+
+    def update_company_enrichment(
+        self,
+        company_id: str,
+        email: str | None,
+        address_enriched: str | None,
+        contact_source_url: str | None,
+    ) -> None:
+        if not any([email, address_enriched, contact_source_url]):
+            return
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE companies
+                SET email=COALESCE(?, email),
+                    address_enriched=COALESCE(?, address_enriched),
+                    contact_source_url=COALESCE(?, contact_source_url),
+                    enrichment_updated_at=?,
+                    updated_at=?
+                WHERE id=?
+                """,
+                (email, address_enriched, contact_source_url, utcnow_iso(), utcnow_iso(), company_id),
+            )
+            conn.commit()
 
     def insert_source_record(self, company_id: str, run_id: str, source_name: str, source_url: str | None, raw_payload: dict[str, Any]) -> None:
         with self._conn() as conn:
@@ -220,11 +264,14 @@ class Repository:
                 city=r["city"],
                 postal_code=r["postal_code"],
                 address=r["address"],
+                address_enriched=r["address_enriched"],
                 website_url=r["website_url"],
                 website_domain=r["website_domain"],
                 phone=r["phone"],
+                email=r["email"],
                 source_primary=r["source_primary"],
                 source_ref=r["source_ref"],
+                contact_source_url=r["contact_source_url"],
             )
             for r in rows
         ]
@@ -309,7 +356,19 @@ class Repository:
         with self._conn() as conn:
             cur = conn.execute(
                 """
-                SELECT ls.*, c.name, c.industry, c.city, c.website_url, c.phone
+                SELECT
+                  ls.*,
+                  c.name,
+                  c.industry,
+                  c.city,
+                  c.website_url,
+                  c.website_domain,
+                  c.phone,
+                  c.email,
+                  c.address AS address_source,
+                  c.address_enriched,
+                  COALESCE(c.address_enriched, c.address) AS address,
+                  c.contact_source_url
                 FROM lead_scores ls
                 JOIN companies c ON c.id = ls.company_id
                 WHERE ls.run_id=?

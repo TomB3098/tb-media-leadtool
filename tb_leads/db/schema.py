@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS companies (
     website_domain TEXT,
     website_domain_norm TEXT NOT NULL DEFAULT '',
     phone TEXT,
+    email TEXT,
+    address_enriched TEXT,
+    contact_source_url TEXT,
+    enrichment_updated_at TEXT,
     source_primary TEXT NOT NULL,
     source_ref TEXT,
     is_public_b2b INTEGER NOT NULL DEFAULT 1,
@@ -127,10 +131,33 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC);
 """
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_type_sql: str) -> None:
+    if not _column_exists(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type_sql}")
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    # Backward-compatible migration path for already initialized DB files
+    _ensure_column(conn, "companies", "website_domain_norm", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "companies", "email", "TEXT")
+    _ensure_column(conn, "companies", "address_enriched", "TEXT")
+    _ensure_column(conn, "companies", "contact_source_url", "TEXT")
+    _ensure_column(conn, "companies", "enrichment_updated_at", "TEXT")
+
+    # Fill website_domain_norm for older rows
+    conn.execute("UPDATE companies SET website_domain_norm='' WHERE website_domain_norm IS NULL")
+
+
 def init_db(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(SCHEMA_SQL)
+        _apply_migrations(conn)
         conn.commit()
     finally:
         conn.close()
