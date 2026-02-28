@@ -1,0 +1,14 @@
+default_region: "Krefeld"
+default_radius_km: 30
+default_limit: 30
+min_score_for_sync: 50
+pagespeed:
+  strategy: "mobile"
+notion:
+  enabled: true
+compliance:
+  allowed_sources:
+    - "manual_public_csv"
+    - "seed_public_demo"
+  max_requests_per_minute: 30
+  disallow_private_emails: true

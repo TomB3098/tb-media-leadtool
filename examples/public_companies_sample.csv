@@ -1,0 +1,4 @@
+name,industry,city,postal_code,address,website_url,phone,source_ref
+Praxis am Stadtpark,Arztpraxen,Krefeld,47798,Stadtpark 1,https://example.com,02151-111111,https://example.invalid/listing/1
+Malerbetrieb Niederrhein,Handwerk,Krefeld,47803,Siempelkampstr. 12,https://example.org,02151-222222,https://example.invalid/listing/2
+Kanzlei Rheinblick,Kanzlei,Krefeld,47799,Rheinstr. 88,https://example.net,02151-333333,https://example.invalid/listing/3
