@@ -48,11 +48,21 @@ def _is_valid_email(value: str) -> bool:
         return False
     if "@" not in value:
         return False
+
     local, _, domain = value.rpartition("@")
+    domain = domain.lower().strip()
+
     if not local or not domain:
         return False
     if "." not in domain:
         return False
+
+    # Filter known placeholders / non-routable testing domains
+    if domain.endswith(".invalid"):
+        return False
+    if domain in {"example.com", "example.org", "example.net", "example.invalid"}:
+        return False
+
     return True
 
 

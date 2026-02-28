@@ -8,7 +8,12 @@ class EnrichmentParsingTests(unittest.TestCase):
         text = "Kontakt: info@beispiel.de oder support@example.com"
         emails = _extract_emails(text)
         self.assertIn("info@beispiel.de", emails)
-        self.assertIn("support@example.com", emails)
+        self.assertNotIn("support@example.com", emails)
+
+    def test_extract_emails_filters_invalid_domain(self):
+        text = "Mail: kontakt@firma.invalid"
+        emails = _extract_emails(text)
+        self.assertEqual(emails, [])
 
     def test_extract_address(self):
         text = """
