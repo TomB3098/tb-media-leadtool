@@ -1,0 +1,4 @@
+name,industry,city,postal_code,address,website_url,phone,source_ref
+Leadtool Kandidat 1,Dienstleister,Krefeld,47798,,http://127.0.0.1:8765/lead1/index.html,02151-910001,local:1
+Leadtool Kandidat 2,Dienstleister,Krefeld,47803,,http://127.0.0.1:8765/lead2/index.html,02151-910002,local:2
+Leadtool Kandidat 3,Dienstleister,Krefeld,47799,,http://127.0.0.1:8765/lead3/index.html,02151-910003,local:3

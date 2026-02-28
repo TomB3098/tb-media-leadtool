@@ -16,9 +16,11 @@ Das Tool sammelt öffentlich verfügbare B2B-Daten, führt einen technischen Web
   - `run` (End-to-End)
 - SQLite-Datenmodell (Runs, Companies, Audits, Scores, Sync-Log)
 - Dedup (Name + Ort + Domain)
+- Enrichment: E-Mail + Adresse aus Impressum/Kontaktseiten
 - Regelbasierte Score-Engine (0–100, A/B/C)
 - Compliance-Basischecks (Source-Allowlist, simple PII-Checks, Event-Log)
-- CSV-Report + Terminal-Summary
+- Notion-Sync mit idempotentem Upsert (Create/Update)
+- CSV-Report + Terminal-Summary (inkl. E-Mail/Adresse)
 
 ## Quickstart
 

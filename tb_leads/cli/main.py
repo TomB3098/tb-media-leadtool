@@ -92,16 +92,30 @@ def _collect_records(args: argparse.Namespace, run_id: str, cfg: dict[str, Any],
     return len(companies)
 
 
-def _audit_records(run_id: str, cfg: dict[str, Any], repo: Repository) -> int:
+def _audit_records(run_id: str, cfg: dict[str, Any], repo: Repository) -> dict[str, int]:
     companies = repo.get_companies_for_run(run_id)
     strategy = cfg.get("pagespeed", {}).get("strategy", "mobile")
     key = cfg.get("page_speed_api_key")
 
+    enriched_count = 0
     for company in companies:
         audit = run_audit(company.website_url, key, strategy=strategy)
         repo.insert_website_audit(company.id, run_id, audit)
 
-    return len(companies)
+        email = audit.get("enriched_email")
+        address = audit.get("enriched_address")
+        source_url = audit.get("enriched_contact_source_url")
+        if any([email, address]):
+            enriched_count += 1
+
+        repo.update_company_enrichment(
+            company_id=company.id,
+            email=email,
+            address_enriched=address,
+            contact_source_url=source_url,
+        )
+
+    return {"audited": len(companies), "enriched": enriched_count}
 
 
 def _score_records(run_id: str, repo: Repository) -> int:
@@ -131,16 +145,42 @@ def _score_records(run_id: str, repo: Repository) -> int:
     return len(scored)
 
 
-def _sync_records(run_id: str, min_class: str, cfg: dict[str, Any], repo: Repository) -> int:
+def _sync_records(run_id: str, min_class: str, cfg: dict[str, Any], repo: Repository) -> dict[str, Any]:
     leads = repo.get_scored_leads_for_run(run_id, min_class=min_class)
     notion = NotionClient(token=cfg.get("notion_token"), database_id=cfg.get("notion_db_id"))
 
-    synced = 0
+    result_counts = {
+        "success": 0,
+        "created": 0,
+        "updated": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
+    example_lines: list[str] = []
+
     for lead in leads:
         result = notion.upsert_lead(lead)
         status = result.get("status", "failed")
+        action = result.get("action")
+
         if status == "success":
-            synced += 1
+            result_counts["success"] += 1
+            if action == "created":
+                result_counts["created"] += 1
+            if action == "updated":
+                result_counts["updated"] += 1
+        elif status == "skipped":
+            result_counts["skipped"] += 1
+        else:
+            result_counts["failed"] += 1
+
+        if len(example_lines) < 5:
+            example_lines.append(
+                f"- {lead.get('name')} | {lead.get('score_class')} {lead.get('score_total')} | "
+                f"email={lead.get('email') or '-'} | address={lead.get('address') or '-'} | "
+                f"sync={status}/{action or '-'}"
+            )
+
         repo.insert_notion_sync(
             company_id=lead["company_id"],
             run_id=run_id,
@@ -149,8 +189,8 @@ def _sync_records(run_id: str, min_class: str, cfg: dict[str, Any], repo: Reposi
             sync_error=result.get("error") or result.get("reason"),
         )
 
-    repo.update_run_counts(run_id, synced_count=synced)
-    return synced
+    repo.update_run_counts(run_id, synced_count=result_counts["success"])
+    return {"counts": result_counts, "examples": example_lines}
 
 
 def _report(run_id: str, out: str, repo: Repository) -> str:
@@ -184,8 +224,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "audit":
-        audited = _audit_records(args.run_id, cfg, repo)
-        print(f"Audit abgeschlossen für {audited} Companies (run_id={args.run_id})")
+        audit_result = _audit_records(args.run_id, cfg, repo)
+        print(
+            f"Audit abgeschlossen für {audit_result['audited']} Companies "
+            f"(Enrichment mit E-Mail/Adresse: {audit_result['enriched']}) (run_id={args.run_id})"
+        )
         return 0
 
     if args.command == "score":
@@ -194,8 +237,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "sync":
-        synced = _sync_records(args.run_id, args.min_class, cfg, repo)
-        print(f"Sync abgeschlossen. Erfolgreich synchronisiert: {synced} (run_id={args.run_id})")
+        sync_result = _sync_records(args.run_id, args.min_class, cfg, repo)
+        c = sync_result["counts"]
+        print(
+            "Sync abgeschlossen. "
+            f"success={c['success']} (created={c['created']}, updated={c['updated']}) "
+            f"failed={c['failed']} skipped={c['skipped']} (run_id={args.run_id})"
+        )
+        if sync_result["examples"]:
+            print("Sync-Beispiele:")
+            for line in sync_result["examples"]:
+                print(line)
         return 0
 
     if args.command == "report":
@@ -206,15 +258,23 @@ def main(argv: list[str] | None = None) -> int:
         run_id = repo.create_run(args.region, args.industry, args.limit)
         try:
             collected = _collect_records(args, run_id, cfg, repo)
-            audited = _audit_records(run_id, cfg, repo)
+            audit_result = _audit_records(run_id, cfg, repo)
             scored = _score_records(run_id, repo)
-            synced = 0
+            sync_result = {"counts": {"success": 0, "created": 0, "updated": 0, "failed": 0, "skipped": 0}, "examples": []}
             if not args.skip_sync:
-                synced = _sync_records(run_id, args.min_class, cfg, repo)
+                sync_result = _sync_records(run_id, args.min_class, cfg, repo)
             _report(run_id, args.out, repo)
             repo.finish_run(run_id, status="success", notes="run completed")
+            c = sync_result["counts"]
             print(f"Run erfolgreich: {run_id}")
-            print(f"collect={collected} audit={audited} score={scored} sync={synced}")
+            print(
+                f"collect={collected} audit={audit_result['audited']} enriched={audit_result['enriched']} "
+                f"score={scored} sync_success={c['success']}"
+            )
+            if sync_result["examples"]:
+                print("Sync-Beispiele:")
+                for line in sync_result["examples"]:
+                    print(line)
             return 0
         except Exception as exc:
             repo.finish_run(run_id, status="failed", notes=str(exc))
