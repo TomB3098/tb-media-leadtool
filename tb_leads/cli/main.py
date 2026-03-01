@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import sys
+import time
+from dataclasses import dataclass
 from typing import Any
 
 from tb_leads.audit.service import run_audit
@@ -15,10 +16,35 @@ from tb_leads.reporting.csv_exporter import export_scored_leads
 from tb_leads.reporting.summary import summarize
 from tb_leads.scoring.engine import score_lead
 from tb_leads.sync.notion_client import NotionClient
+from tb_leads.utils.errors import ErrorCode, ToolError
+from tb_leads.utils.http import HttpClient
+from tb_leads.utils.retry import RetryPolicy
+from tb_leads.utils.throttle import RateLimiter
+
+
+@dataclass
+class RunCounters:
+    collected: int = 0
+    audited: int = 0
+    enriched: int = 0
+    scored: int = 0
+    sync_success: int = 0
+    sync_created: int = 0
+    sync_updated: int = 0
+    sync_failed: int = 0
+    sync_skipped: int = 0
+    error_count: int = 0
+    network_error_count: int = 0
+
+
+@dataclass
+class RunLimits:
+    max_errors_per_run: int
+    max_network_errors_per_run: int
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="tb-leads", description="TB Media Leadtool MVP CLI")
+    parser = argparse.ArgumentParser(prog="tb-leads", description="TB Media Leadtool CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init-db", help="Initialisiert die SQLite-Datenbank")
@@ -45,19 +71,63 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--out", default="reports")
 
     run = sub.add_parser("run", help="End-to-End Pipeline")
-    run.add_argument("--region", required=True)
-    run.add_argument("--industry", required=True)
-    run.add_argument("--limit", type=int, default=30)
+    run.add_argument("--region")
+    run.add_argument("--industry")
+    run.add_argument("--limit", type=int)
     run.add_argument("--source", choices=["seed", "csv"], default="seed")
     run.add_argument("--csv-path", default="examples/public_companies_sample.csv")
     run.add_argument("--min-class", choices=["A", "B", "C"], default="B")
     run.add_argument("--out", default="reports")
     run.add_argument("--skip-sync", action="store_true")
+    run.add_argument("--resume-run-id")
+    run.add_argument("--resume-latest", action="store_true")
 
     return parser
 
 
-def _collect_records(args: argparse.Namespace, run_id: str, cfg: dict[str, Any], repo: Repository) -> int:
+def _make_http_client(cfg: dict[str, Any]) -> HttpClient:
+    max_rpm = int(cfg.get("compliance", {}).get("max_requests_per_minute", 30))
+    network_cfg = cfg.get("network", {})
+
+    retry_policy = RetryPolicy(
+        max_attempts=int(network_cfg.get("max_retries", 3)),
+        base_delay_s=float(network_cfg.get("backoff_base_seconds", 0.35)),
+        max_delay_s=float(network_cfg.get("backoff_max_seconds", 4.0)),
+        jitter_s=float(network_cfg.get("jitter_seconds", 0.2)),
+    )
+
+    return HttpClient(
+        timeout_s=float(network_cfg.get("timeout_seconds", 10)),
+        rate_limiter=RateLimiter(max_requests_per_minute=max_rpm),
+        retry_policy=retry_policy,
+    )
+
+
+def _run_limits(cfg: dict[str, Any]) -> RunLimits:
+    run_cfg = cfg.get("run", {})
+    return RunLimits(
+        max_errors_per_run=int(run_cfg.get("max_errors_per_run", 50)),
+        max_network_errors_per_run=int(run_cfg.get("max_network_errors_per_run", 20)),
+    )
+
+
+def _check_abort_thresholds(run_id: str, counters: RunCounters, limits: RunLimits, repo: Repository) -> None:
+    if counters.error_count > limits.max_errors_per_run:
+        msg = f"{ErrorCode.RUN_ABORT_THRESHOLD}: max_errors_per_run exceeded ({counters.error_count}>{limits.max_errors_per_run})"
+        repo.append_run_note(run_id, msg)
+        raise ToolError(ErrorCode.RUN_ABORT_THRESHOLD, msg)
+    if counters.network_error_count > limits.max_network_errors_per_run:
+        msg = (
+            f"{ErrorCode.RUN_ABORT_THRESHOLD}: max_network_errors_per_run exceeded "
+            f"({counters.network_error_count}>{limits.max_network_errors_per_run})"
+        )
+        repo.append_run_note(run_id, msg)
+        raise ToolError(ErrorCode.RUN_ABORT_THRESHOLD, msg)
+
+
+def _collect_records(args: argparse.Namespace, run_id: str, cfg: dict[str, Any], repo: Repository, counters: RunCounters) -> int:
+    repo.set_run_stage(run_id, "collect")
+
     if args.source == "csv":
         records = collect_from_csv(args.csv_path, args.region, args.industry, args.limit)
     else:
@@ -74,6 +144,8 @@ def _collect_records(args: argparse.Namespace, run_id: str, cfg: dict[str, Any],
                 message=ev["message"],
                 context=ev.get("context"),
             )
+            if ev["severity"] == "error":
+                counters.error_count += 1
 
         if any(ev["severity"] == "error" for ev in events):
             continue
@@ -88,18 +160,28 @@ def _collect_records(args: argparse.Namespace, run_id: str, cfg: dict[str, Any],
         )
 
     companies = repo.get_companies_for_run(run_id)
-    repo.update_run_counts(run_id, collected_count=len(companies))
-    return len(companies)
+    counters.collected = len(companies)
+    repo.update_run_counts(run_id, collected_count=counters.collected, error_count=counters.error_count)
+    return counters.collected
 
 
-def _audit_records(run_id: str, cfg: dict[str, Any], repo: Repository) -> dict[str, int]:
+def _audit_records(
+    run_id: str,
+    cfg: dict[str, Any],
+    repo: Repository,
+    counters: RunCounters,
+    http_client: HttpClient,
+) -> dict[str, int]:
+    repo.set_run_stage(run_id, "audit")
+
     companies = repo.get_companies_for_run(run_id)
     strategy = cfg.get("pagespeed", {}).get("strategy", "mobile")
     key = cfg.get("page_speed_api_key")
 
+    repo.clear_run_audits(run_id)
     enriched_count = 0
     for company in companies:
-        audit = run_audit(company.website_url, key, strategy=strategy)
+        audit = run_audit(company.website_url, key, http_client=http_client, strategy=strategy)
         repo.insert_website_audit(company.id, run_id, audit)
 
         email = audit.get("enriched_email")
@@ -108,6 +190,9 @@ def _audit_records(run_id: str, cfg: dict[str, Any], repo: Repository) -> dict[s
         if any([email, address]):
             enriched_count += 1
 
+        counters.network_error_count += int(audit.get("network_error_count") or 0)
+        counters.error_count += len(audit.get("error_codes") or [])
+
         repo.update_company_enrichment(
             company_id=company.id,
             email=email,
@@ -115,14 +200,24 @@ def _audit_records(run_id: str, cfg: dict[str, Any], repo: Repository) -> dict[s
             contact_source_url=source_url,
         )
 
-    return {"audited": len(companies), "enriched": enriched_count}
+    counters.audited = len(companies)
+    counters.enriched = enriched_count
+    repo.update_run_counts(
+        run_id,
+        error_count=counters.error_count,
+        network_error_count=counters.network_error_count,
+    )
+    return {"audited": counters.audited, "enriched": counters.enriched}
 
 
-def _score_records(run_id: str, repo: Repository) -> int:
+def _score_records(run_id: str, repo: Repository, counters: RunCounters) -> int:
+    repo.set_run_stage(run_id, "score")
+
     companies = repo.get_companies_for_run(run_id)
     audits = repo.latest_audit_for_run(run_id)
 
-    scored = []
+    repo.clear_run_scores(run_id)
+    scored: list[tuple[str, dict[str, Any]]] = []
     for company in companies:
         audit = audits.get(company.id)
         if not audit:
@@ -141,13 +236,30 @@ def _score_records(run_id: str, repo: Repository) -> int:
             priority_rank=rank,
         )
 
-    repo.update_run_counts(run_id, scored_count=len(scored))
-    return len(scored)
+    counters.scored = len(scored)
+    repo.update_run_counts(run_id, scored_count=counters.scored)
+    return counters.scored
 
 
-def _sync_records(run_id: str, min_class: str, cfg: dict[str, Any], repo: Repository) -> dict[str, Any]:
+def _sync_records(
+    run_id: str,
+    min_class: str,
+    cfg: dict[str, Any],
+    repo: Repository,
+    counters: RunCounters,
+    http_client: HttpClient,
+) -> dict[str, Any]:
+    repo.set_run_stage(run_id, "sync")
+
     leads = repo.get_scored_leads_for_run(run_id, min_class=min_class)
-    notion = NotionClient(token=cfg.get("notion_token"), database_id=cfg.get("notion_db_id"))
+    notion = NotionClient(
+        token=cfg.get("notion_token"),
+        database_id=cfg.get("notion_db_id"),
+        http_client=http_client,
+        api_base_url=cfg.get("notion", {}).get("api_base_url", "https://api.notion.com/v1"),
+    )
+
+    repo.clear_run_sync_logs(run_id)
 
     result_counts = {
         "success": 0,
@@ -173,6 +285,9 @@ def _sync_records(run_id: str, min_class: str, cfg: dict[str, Any], repo: Reposi
             result_counts["skipped"] += 1
         else:
             result_counts["failed"] += 1
+            counters.error_count += 1
+            if str(result.get("error_code", "")).startswith("NOTION_"):
+                counters.network_error_count += 1
 
         if len(example_lines) < 5:
             example_lines.append(
@@ -189,16 +304,145 @@ def _sync_records(run_id: str, min_class: str, cfg: dict[str, Any], repo: Reposi
             sync_error=result.get("error") or result.get("reason"),
         )
 
-    repo.update_run_counts(run_id, synced_count=result_counts["success"])
+    counters.sync_success = result_counts["success"]
+    counters.sync_created = result_counts["created"]
+    counters.sync_updated = result_counts["updated"]
+    counters.sync_failed = result_counts["failed"]
+    counters.sync_skipped = result_counts["skipped"]
+
+    repo.update_run_counts(
+        run_id,
+        synced_count=counters.sync_success,
+        error_count=counters.error_count,
+        network_error_count=counters.network_error_count,
+    )
     return {"counts": result_counts, "examples": example_lines}
 
 
 def _report(run_id: str, out: str, repo: Repository) -> str:
+    repo.set_run_stage(run_id, "report")
     leads = repo.get_scored_leads_for_run(run_id, min_class="C")
     path = export_scored_leads(leads, out, run_id)
     print(summarize(leads))
     print(f"CSV: {path}")
     return path
+
+
+def _resolve_run_for_execution(args: argparse.Namespace, cfg: dict[str, Any], repo: Repository) -> tuple[str, bool]:
+    """Returns (run_id, resumed)."""
+    if getattr(args, "resume_run_id", None):
+        run = repo.get_run(args.resume_run_id)
+        if not run:
+            raise ToolError("RUN_NOT_FOUND", f"Run {args.resume_run_id} wurde nicht gefunden")
+        repo.set_run_stage(args.resume_run_id, "resume")
+        repo.append_run_note(args.resume_run_id, "Resumed via --resume-run-id")
+        return args.resume_run_id, True
+
+    if getattr(args, "resume_latest", False):
+        run = repo.get_latest_resumable_run()
+        if run:
+            repo.set_run_stage(run["id"], "resume")
+            repo.append_run_note(run["id"], "Resumed via --resume-latest")
+            return run["id"], True
+
+    region = args.region or cfg.get("default_region")
+    industry = args.industry or "Dienstleister"
+    limit = args.limit or int(cfg.get("default_limit", 30))
+    run_id = repo.create_run(region, industry, limit)
+    return run_id, False
+
+
+def _print_sync_result(run_id: str, sync_result: dict[str, Any]) -> None:
+    c = sync_result["counts"]
+    print(
+        "Sync abgeschlossen. "
+        f"success={c['success']} (created={c['created']}, updated={c['updated']}) "
+        f"failed={c['failed']} skipped={c['skipped']} (run_id={run_id})"
+    )
+    if sync_result["examples"]:
+        print("Sync-Beispiele:")
+        for line in sync_result["examples"]:
+            print(line)
+
+
+def _run_pipeline(args: argparse.Namespace, cfg: dict[str, Any], repo: Repository, http_client: HttpClient) -> int:
+    run_id, resumed = _resolve_run_for_execution(args, cfg, repo)
+    run = repo.get_run(run_id) or {}
+
+    # backfill args when resuming
+    if resumed:
+        args.region = args.region or run.get("region")
+        args.industry = args.industry or run.get("industry")
+        args.limit = args.limit or int(run.get("limit_requested") or cfg.get("default_limit", 30))
+
+    counters = RunCounters(
+        collected=int(run.get("collected_count") or 0),
+        scored=int(run.get("scored_count") or 0),
+        sync_success=int(run.get("synced_count") or 0),
+        error_count=int(run.get("error_count") or 0),
+        network_error_count=int(run.get("network_error_count") or 0),
+    )
+    limits = _run_limits(cfg)
+
+    started = time.monotonic()
+    partial = False
+    try:
+        if not resumed:
+            _collect_records(args, run_id, cfg, repo, counters)
+        _check_abort_thresholds(run_id, counters, limits, repo)
+
+        _audit_records(run_id, cfg, repo, counters, http_client)
+        _check_abort_thresholds(run_id, counters, limits, repo)
+
+        _score_records(run_id, repo, counters)
+        _check_abort_thresholds(run_id, counters, limits, repo)
+
+        sync_result = {"counts": {"success": 0, "created": 0, "updated": 0, "failed": 0, "skipped": 0}, "examples": []}
+        if not args.skip_sync:
+            sync_result = _sync_records(run_id, args.min_class, cfg, repo, counters, http_client)
+            _check_abort_thresholds(run_id, counters, limits, repo)
+
+        _report(run_id, args.out, repo)
+
+        elapsed = time.monotonic() - started
+        repo.append_run_note(run_id, f"elapsed_seconds={elapsed:.2f}")
+
+        final_status = "partial" if sync_result["counts"].get("failed", 0) > 0 else "completed"
+        repo.finish_run(run_id, status=final_status, notes=f"run finished in {elapsed:.2f}s")
+
+        print(f"Run abgeschlossen: {run_id} [{final_status}]")
+        print(
+            f"collect={counters.collected} audit={counters.audited} enriched={counters.enriched} "
+            f"score={counters.scored} sync_success={counters.sync_success} errors={counters.error_count} "
+            f"network_errors={counters.network_error_count} elapsed={elapsed:.2f}s"
+        )
+
+        if sync_result["examples"]:
+            print("Sync-Beispiele:")
+            for line in sync_result["examples"]:
+                print(line)
+
+        return 0
+
+    except ToolError as exc:
+        partial = True
+        repo.append_run_note(run_id, f"{exc.code}: {exc.message}")
+        repo.update_run_counts(
+            run_id,
+            error_count=counters.error_count + 1,
+            network_error_count=counters.network_error_count,
+        )
+        repo.finish_run(run_id, status="partial", notes=f"pipeline interrupted: {exc.code}")
+        print(f"Run partial: {run_id} - {exc.code} {exc.message}")
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        repo.append_run_note(run_id, f"UNHANDLED: {exc}")
+        repo.finish_run(run_id, status="failed", notes=str(exc))
+        print(f"Run fehlgeschlagen: {run_id} - {exc}")
+        return 1
+    finally:
+        if partial:
+            repo.set_run_stage(run_id, "partial")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -211,43 +455,39 @@ def main(argv: list[str] | None = None) -> int:
         print(f"DB initialisiert: {db_path}")
         return 0
 
-    # All other commands require DB
     init_db(db_path)
     repo = Repository(db_path)
+    http_client = _make_http_client(cfg)
 
     if args.command == "collect":
         run_id = repo.create_run(args.region, args.industry, args.limit)
-        count = _collect_records(args, run_id, cfg, repo)
-        repo.finish_run(run_id, status="success", notes="collect completed")
+        counters = RunCounters()
+        _collect_records(args, run_id, cfg, repo, counters)
+        repo.finish_run(run_id, status="completed", notes="collect completed")
         print(f"Run erstellt: {run_id}")
-        print(f"Collect abgeschlossen. Leads: {count}")
+        print(f"Collect abgeschlossen. Leads: {counters.collected}")
         return 0
 
     if args.command == "audit":
-        audit_result = _audit_records(args.run_id, cfg, repo)
+        counters = RunCounters()
+        result = _audit_records(args.run_id, cfg, repo, counters, http_client)
         print(
-            f"Audit abgeschlossen für {audit_result['audited']} Companies "
-            f"(Enrichment mit E-Mail/Adresse: {audit_result['enriched']}) (run_id={args.run_id})"
+            f"Audit abgeschlossen für {result['audited']} Companies "
+            f"(Enrichment mit E-Mail/Adresse: {result['enriched']}) "
+            f"errors={counters.error_count} net_errors={counters.network_error_count}"
         )
         return 0
 
     if args.command == "score":
-        scored = _score_records(args.run_id, repo)
+        counters = RunCounters()
+        scored = _score_records(args.run_id, repo, counters)
         print(f"Scoring abgeschlossen. Scores: {scored} (run_id={args.run_id})")
         return 0
 
     if args.command == "sync":
-        sync_result = _sync_records(args.run_id, args.min_class, cfg, repo)
-        c = sync_result["counts"]
-        print(
-            "Sync abgeschlossen. "
-            f"success={c['success']} (created={c['created']}, updated={c['updated']}) "
-            f"failed={c['failed']} skipped={c['skipped']} (run_id={args.run_id})"
-        )
-        if sync_result["examples"]:
-            print("Sync-Beispiele:")
-            for line in sync_result["examples"]:
-                print(line)
+        counters = RunCounters()
+        sync_result = _sync_records(args.run_id, args.min_class, cfg, repo, counters, http_client)
+        _print_sync_result(args.run_id, sync_result)
         return 0
 
     if args.command == "report":
@@ -255,31 +495,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "run":
-        run_id = repo.create_run(args.region, args.industry, args.limit)
-        try:
-            collected = _collect_records(args, run_id, cfg, repo)
-            audit_result = _audit_records(run_id, cfg, repo)
-            scored = _score_records(run_id, repo)
-            sync_result = {"counts": {"success": 0, "created": 0, "updated": 0, "failed": 0, "skipped": 0}, "examples": []}
-            if not args.skip_sync:
-                sync_result = _sync_records(run_id, args.min_class, cfg, repo)
-            _report(run_id, args.out, repo)
-            repo.finish_run(run_id, status="success", notes="run completed")
-            c = sync_result["counts"]
-            print(f"Run erfolgreich: {run_id}")
-            print(
-                f"collect={collected} audit={audit_result['audited']} enriched={audit_result['enriched']} "
-                f"score={scored} sync_success={c['success']}"
-            )
-            if sync_result["examples"]:
-                print("Sync-Beispiele:")
-                for line in sync_result["examples"]:
-                    print(line)
-            return 0
-        except Exception as exc:
-            repo.finish_run(run_id, status="failed", notes=str(exc))
-            print(f"Run fehlgeschlagen: {run_id} - {exc}", file=sys.stderr)
-            return 1
+        return _run_pipeline(args, cfg, repo, http_client)
 
     return 1
 

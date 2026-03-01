@@ -56,25 +56,42 @@ class Repository:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
-    def create_run(self, region: str, industry: str, limit: int) -> str:
+    def create_run(self, region: str, industry: str, limit: int, resumed_from_run_id: str | None = None) -> str:
         run_id = str(uuid.uuid4())
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO runs(id, started_at, status, region, industry, limit_requested)
-                VALUES(?, ?, 'running', ?, ?, ?)
+                INSERT INTO runs(
+                    id, started_at, status, region, industry, limit_requested,
+                    network_error_count, last_stage, resumed_from_run_id
+                )
+                VALUES(?, ?, 'running', ?, ?, ?, 0, 'init', ?)
                 """,
-                (run_id, utcnow_iso(), region, industry, limit),
+                (run_id, utcnow_iso(), region, industry, limit, resumed_from_run_id),
             )
             conn.commit()
         return run_id
 
-    def finish_run(self, run_id: str, status: str = "success", notes: str | None = None) -> None:
+    def set_run_stage(self, run_id: str, stage: str) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE runs SET last_stage=? WHERE id=?", (stage, run_id))
+            conn.commit()
+
+    def append_run_note(self, run_id: str, note: str) -> None:
+        with self._conn() as conn:
+            current = conn.execute("SELECT notes FROM runs WHERE id=?", (run_id,)).fetchone()
+            prev = (current[0] if current and current[0] else "").strip()
+            merged = f"{prev}\n{note}".strip() if prev else note
+            conn.execute("UPDATE runs SET notes=? WHERE id=?", (merged, run_id))
+            conn.commit()
+
+    def finish_run(self, run_id: str, status: str = "completed", notes: str | None = None) -> None:
+        status = status if status in {"running", "completed", "partial", "failed", "success"} else "failed"
         with self._conn() as conn:
             conn.execute(
                 """
                 UPDATE runs
-                SET finished_at=?, status=?, notes=?
+                SET finished_at=?, status=?, notes=COALESCE(?, notes)
                 WHERE id=?
                 """,
                 (utcnow_iso(), status, notes, run_id),
@@ -88,6 +105,7 @@ class Repository:
         scored_count: int | None = None,
         synced_count: int | None = None,
         error_count: int | None = None,
+        network_error_count: int | None = None,
     ) -> None:
         updates: list[str] = []
         values: list[Any] = []
@@ -103,6 +121,9 @@ class Repository:
         if error_count is not None:
             updates.append("error_count=?")
             values.append(error_count)
+        if network_error_count is not None:
+            updates.append("network_error_count=?")
+            values.append(network_error_count)
 
         if not updates:
             return
@@ -276,6 +297,21 @@ class Repository:
             for r in rows
         ]
 
+    def clear_run_audits(self, run_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM website_audits WHERE run_id=?", (run_id,))
+            conn.commit()
+
+    def clear_run_scores(self, run_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM lead_scores WHERE run_id=?", (run_id,))
+            conn.commit()
+
+    def clear_run_sync_logs(self, run_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM notion_sync WHERE run_id=?", (run_id,))
+            conn.commit()
+
     def insert_website_audit(self, company_id: str, run_id: str, audit: dict[str, Any]) -> None:
         with self._conn() as conn:
             conn.execute(
@@ -414,5 +450,18 @@ class Repository:
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with self._conn() as conn:
             cur = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,))
+            row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_latest_resumable_run(self) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                SELECT * FROM runs
+                WHERE status IN ('running', 'partial', 'failed')
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            )
             row = cur.fetchone()
         return dict(row) if row else None

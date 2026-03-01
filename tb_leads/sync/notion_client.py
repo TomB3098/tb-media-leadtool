@@ -4,8 +4,9 @@ import json
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
-import urllib.error
-import urllib.request
+
+from tb_leads.utils.errors import ErrorCode, ToolError
+from tb_leads.utils.http import HttpClient
 
 
 @dataclass
@@ -22,37 +23,58 @@ class PropertyMap:
 
 
 class NotionClient:
-    def __init__(self, token: str | None, database_id: str | None):
+    def __init__(
+        self,
+        token: str | None,
+        database_id: str | None,
+        http_client: HttpClient,
+        api_base_url: str = "https://api.notion.com/v1",
+    ):
         self.token = token
         self.database_id = database_id
+        self.http_client = http_client
+        self.api_base_url = api_base_url.rstrip("/")
         self._database_schema: dict[str, Any] | None = None
 
     @property
     def enabled(self) -> bool:
         return bool(self.token and self.database_id)
 
-    def _request(self, method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Notion-Version": "2022-06-28",
+        }
+
+    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.enabled:
-            raise RuntimeError("Notion credentials fehlen")
+            raise ToolError(ErrorCode.NOTION_AUTH, "Notion credentials fehlen")
 
-        data = json.dumps(payload).encode("utf-8") if payload is not None else None
-        req = urllib.request.Request(
-            url,
-            method=method,
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Notion-Version": "2022-06-28",
-                "Content-Type": "application/json",
-            },
-            data=data,
-        )
+        url = f"{self.api_base_url}{path}"
 
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        try:
+            if method == "GET":
+                return self.http_client.get_json(url, headers=self._headers())
+            if method == "POST":
+                return self.http_client.post_json(url, payload or {}, headers=self._headers())
+            if method == "PATCH":
+                return self.http_client.patch_json(url, payload or {}, headers=self._headers())
+            raise ToolError(ErrorCode.NOTION_SERVER_ERROR, f"Unsupported method {method}")
+        except ToolError as exc:
+            msg = (exc.detail or "").lower()
+            if "http 401" in msg:
+                raise ToolError(ErrorCode.NOTION_AUTH, "Notion unauthorized", detail=exc.detail) from exc
+            if "http 403" in msg:
+                raise ToolError(ErrorCode.NOTION_FORBIDDEN, "Notion forbidden", detail=exc.detail) from exc
+            if exc.code == ErrorCode.NETWORK_RATE_LIMITED:
+                raise ToolError(ErrorCode.NOTION_RATE_LIMITED, "Notion rate limited", detail=exc.detail) from exc
+            if exc.code == ErrorCode.NETWORK_HTTP_5XX:
+                raise ToolError(ErrorCode.NOTION_SERVER_ERROR, "Notion server error", detail=exc.detail) from exc
+            raise
 
     def _database(self) -> dict[str, Any]:
         if self._database_schema is None:
-            self._database_schema = self._request("GET", f"https://api.notion.com/v1/databases/{self.database_id}")
+            self._database_schema = self._request("GET", f"/databases/{self.database_id}")
         return self._database_schema
 
     def _properties(self) -> dict[str, Any]:
@@ -125,7 +147,7 @@ class NotionClient:
         return ""
 
     def _query_database(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._request("POST", f"https://api.notion.com/v1/databases/{self.database_id}/query", payload)
+        return self._request("POST", f"/databases/{self.database_id}/query", payload)
 
     def _find_existing_page_id(self, lead: dict[str, Any], pmap: PropertyMap) -> str | None:
         if not pmap.title:
@@ -272,18 +294,17 @@ class NotionClient:
             existing_id = self._find_existing_page_id(lead, pmap)
 
             if existing_id:
-                self._request("PATCH", f"https://api.notion.com/v1/pages/{existing_id}", {"properties": props_payload})
+                self._request("PATCH", f"/pages/{existing_id}", {"properties": props_payload})
                 return {"status": "success", "action": "updated", "notion_page_id": existing_id}
 
             data = self._request(
                 "POST",
-                "https://api.notion.com/v1/pages",
+                "/pages",
                 {"parent": {"database_id": self.database_id}, "properties": props_payload},
             )
             return {"status": "success", "action": "created", "notion_page_id": data.get("id")}
 
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else str(exc)
-            return {"status": "failed", "error": f"HTTP {exc.code}: {detail}"}
-        except Exception as exc:
-            return {"status": "failed", "error": str(exc)}
+        except ToolError as exc:
+            return {"status": "failed", "error": f"{exc.code}: {exc.message}", "error_code": exc.code}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "failed", "error": str(exc), "error_code": "UNEXPECTED_NOTION_ERROR"}

@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
     started_at TEXT NOT NULL,
     finished_at TEXT,
-    status TEXT NOT NULL CHECK(status IN ('running','success','failed','partial')),
+    status TEXT NOT NULL CHECK(status IN ('running','completed','partial','failed','success')),
     region TEXT NOT NULL,
     industry TEXT NOT NULL,
     limit_requested INTEGER NOT NULL,
@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS runs (
     scored_count INTEGER NOT NULL DEFAULT 0,
     synced_count INTEGER NOT NULL DEFAULT 0,
     error_count INTEGER NOT NULL DEFAULT 0,
+    network_error_count INTEGER NOT NULL DEFAULT 0,
+    last_stage TEXT NOT NULL DEFAULT 'init',
+    resumed_from_run_id TEXT,
     notes TEXT
 );
 
@@ -141,6 +144,66 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_typ
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type_sql}")
 
 
+def _ensure_runs_status_constraint(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='runs'"
+    ).fetchone()
+    sql = (row[0] if row and row[0] else "").lower()
+    if "completed" in sql:
+        return
+
+    # Rebuild runs table with updated CHECK constraint.
+    conn.execute("ALTER TABLE runs RENAME TO runs_old")
+    conn.execute(
+        """
+        CREATE TABLE runs (
+            id TEXT PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            status TEXT NOT NULL CHECK(status IN ('running','completed','partial','failed','success')),
+            region TEXT NOT NULL,
+            industry TEXT NOT NULL,
+            limit_requested INTEGER NOT NULL,
+            collected_count INTEGER NOT NULL DEFAULT 0,
+            scored_count INTEGER NOT NULL DEFAULT 0,
+            synced_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            network_error_count INTEGER NOT NULL DEFAULT 0,
+            last_stage TEXT NOT NULL DEFAULT 'init',
+            resumed_from_run_id TEXT,
+            notes TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO runs(
+            id, started_at, finished_at, status, region, industry, limit_requested,
+            collected_count, scored_count, synced_count, error_count, network_error_count,
+            last_stage, resumed_from_run_id, notes
+        )
+        SELECT
+            id,
+            started_at,
+            finished_at,
+            CASE WHEN status='success' THEN 'completed' ELSE status END,
+            region,
+            industry,
+            limit_requested,
+            collected_count,
+            scored_count,
+            synced_count,
+            error_count,
+            COALESCE(network_error_count, 0),
+            COALESCE(last_stage, 'init'),
+            resumed_from_run_id,
+            notes
+        FROM runs_old
+        """
+    )
+    conn.execute("DROP TABLE runs_old")
+
+
 def _apply_migrations(conn: sqlite3.Connection) -> None:
     # Backward-compatible migration path for already initialized DB files
     _ensure_column(conn, "companies", "website_domain_norm", "TEXT NOT NULL DEFAULT ''")
@@ -148,6 +211,12 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "companies", "address_enriched", "TEXT")
     _ensure_column(conn, "companies", "contact_source_url", "TEXT")
     _ensure_column(conn, "companies", "enrichment_updated_at", "TEXT")
+
+    _ensure_column(conn, "runs", "network_error_count", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "runs", "last_stage", "TEXT NOT NULL DEFAULT 'init'")
+    _ensure_column(conn, "runs", "resumed_from_run_id", "TEXT")
+
+    _ensure_runs_status_constraint(conn)
 
     # Fill website_domain_norm for older rows
     conn.execute("UPDATE companies SET website_domain_norm='' WHERE website_domain_norm IS NULL")

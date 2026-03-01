@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import html
 import re
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
+
+from tb_leads.utils.errors import ToolError
+from tb_leads.utils.http import HttpClient
 
 PRIVATE_EMAIL_DOMAINS = {
     "gmail.com",
@@ -162,16 +163,11 @@ def _extract_addresses(text: str) -> list[str]:
     return deduped
 
 
-def _fetch_html(url: str, timeout: float = 8.0) -> str | None:
-    req = urllib.request.Request(url, headers={"User-Agent": "tb-leads/0.2"})
+def _fetch_html(url: str, http_client: HttpClient) -> tuple[str | None, str | None]:
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            body = response.read(350_000)
-            return body.decode("utf-8", errors="ignore")
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
-        return None
-    except Exception:
-        return None
+        return http_client.get_text(url), None
+    except ToolError as exc:
+        return None, exc.code
 
 
 def _candidate_urls(website_url: str) -> list[str]:
@@ -197,9 +193,9 @@ def _candidate_urls(website_url: str) -> list[str]:
     return out
 
 
-def enrich_contact_data(website_url: str | None, max_pages: int = 4) -> ContactEnrichmentResult:
+def enrich_contact_data(website_url: str | None, http_client: HttpClient, max_pages: int = 4) -> ContactEnrichmentResult:
     if not website_url:
-        return ContactEnrichmentResult(email=None, address=None, source_url=None, pages_checked=0, warnings=["no_website"])
+        return ContactEnrichmentResult(email=None, address=None, source_url=None, pages_checked=0, warnings=["INPUT:NO_WEBSITE"])
 
     parsed = urlparse(website_url if "//" in website_url else f"https://{website_url}")
     website_domain = parsed.netloc.lower()
@@ -210,9 +206,9 @@ def enrich_contact_data(website_url: str | None, max_pages: int = 4) -> ContactE
     pages_checked = 0
 
     for url in _candidate_urls(website_url)[:max_pages]:
-        html_doc = _fetch_html(url)
+        html_doc, err_code = _fetch_html(url, http_client=http_client)
         if not html_doc:
-            warnings.append(f"fetch_failed:{url}")
+            warnings.append(f"NETWORK:FETCH_FAILED:{err_code or 'UNKNOWN'}:{url}")
             continue
 
         pages_checked += 1

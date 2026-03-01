@@ -20,6 +20,9 @@ Das Tool sammelt öffentlich verfügbare B2B-Daten, führt einen technischen Web
 - Regelbasierte Score-Engine (0–100, A/B/C)
 - Compliance-Basischecks (Source-Allowlist, simple PII-Checks, Event-Log)
 - Notion-Sync mit idempotentem Upsert (Create/Update)
+- Netzwerk-Hardening: Retry + Exponential Backoff + Jitter + Timeouts
+- Globales Throttling via `max_requests_per_minute`
+- Run-Schutzgrenzen (max errors / max network errors) + sauberer Run-Status
 - CSV-Report + Terminal-Summary (inkl. E-Mail/Adresse)
 
 ## Quickstart
@@ -38,6 +41,10 @@ Optional über `config/default.yaml` und ENV-Variablen:
 - `PAGE_SPEED_API_KEY`
 - `NOTION_TOKEN`
 - `NOTION_DB_ID`
+- `NOTION_API_BASE_URL` (optional, z. B. für Tests)
+- `TB_LEADS_MAX_REQUESTS_PER_MINUTE`
+- `TB_LEADS_MAX_ERRORS_PER_RUN`
+- `TB_LEADS_MAX_NETWORK_ERRORS_PER_RUN`
 
 ## Rechtlicher Rahmen
 
