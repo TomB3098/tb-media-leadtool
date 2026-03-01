@@ -90,11 +90,35 @@ def collect_osm_public(
     lat, lon = _get_region_center(region, http_client=http_client)
 
     query = _build_overpass_query(lat=lat, lon=lon, radius_m=max(1000, int(radius_km * 1000)), industry=industry)
-    overpass_url = "https://overpass-api.de/api/interpreter?data=" + quote_plus(query)
-    data = http_client.get_json(
-        overpass_url,
-        headers={"User-Agent": "tb-leads/1.0 (+public-leadtool)"},
-    )
+
+    overpass_endpoints = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.openstreetmap.ru/api/interpreter",
+    ]
+
+    data: dict[str, Any] | None = None
+    errors: list[str] = []
+    for endpoint in overpass_endpoints:
+        overpass_url = endpoint + "?data=" + quote_plus(query)
+        try:
+            candidate = http_client.get_json(
+                overpass_url,
+                headers={"User-Agent": "tb-leads/1.0 (+public-leadtool)"},
+            )
+            if isinstance(candidate, dict) and isinstance(candidate.get("elements"), list):
+                data = candidate
+                break
+        except ToolError as exc:
+            errors.append(f"{endpoint}:{exc.code}")
+            continue
+
+    if data is None:
+        raise ToolError(
+            ErrorCode.NETWORK_MAX_RETRIES,
+            "All Overpass endpoints failed",
+            detail="; ".join(errors[-3:]) if errors else "no response",
+        )
 
     elements = data.get("elements", []) if isinstance(data, dict) else []
 
