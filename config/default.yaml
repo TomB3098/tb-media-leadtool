@@ -14,6 +14,7 @@ compliance:
   allowed_sources:
     - "manual_public_csv"
     - "seed_public_demo"
+    - "osm_overpass_public"
   max_requests_per_minute: 30
   disallow_private_emails: true
 

@@ -8,6 +8,7 @@ from typing import Any
 from tb_leads.audit.service import run_audit
 from tb_leads.collectors.manual_public_csv import collect_from_csv
 from tb_leads.collectors.seed_public_demo import collect as seed_collect
+from tb_leads.collectors.public_osm import collect_osm_public
 from tb_leads.compliance.checker import basic_record_checks
 from tb_leads.config.loader import load_config
 from tb_leads.db.repository import Repository
@@ -16,10 +17,12 @@ from tb_leads.reporting.csv_exporter import export_scored_leads
 from tb_leads.reporting.summary import summarize
 from tb_leads.scoring.engine import score_lead
 from tb_leads.sync.notion_client import NotionClient
+from tb_leads.enrich.validators import validate_lead_record
 from tb_leads.utils.errors import ErrorCode, ToolError
 from tb_leads.utils.http import HttpClient
 from tb_leads.utils.retry import RetryPolicy
 from tb_leads.utils.throttle import RateLimiter
+from tb_leads.utils.runlog import RunLogger
 
 
 @dataclass
@@ -53,8 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--region", required=True)
     collect.add_argument("--industry", required=True)
     collect.add_argument("--limit", type=int, default=30)
-    collect.add_argument("--source", choices=["seed", "csv"], default="seed")
+    collect.add_argument("--source", choices=["seed", "csv", "osm"], default="seed")
     collect.add_argument("--csv-path", default="examples/public_companies_sample.csv")
+    collect.add_argument("--radius-km", type=int, default=20)
 
     audit = sub.add_parser("audit", help="Auditiert Websites für bestehenden Run")
     audit.add_argument("--run-id", required=True)
@@ -74,8 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--region")
     run.add_argument("--industry")
     run.add_argument("--limit", type=int)
-    run.add_argument("--source", choices=["seed", "csv"], default="seed")
+    run.add_argument("--source", choices=["seed", "csv", "osm"], default="seed")
     run.add_argument("--csv-path", default="examples/public_companies_sample.csv")
+    run.add_argument("--radius-km", type=int, default=20)
     run.add_argument("--min-class", choices=["A", "B", "C"], default="B")
     run.add_argument("--out", default="reports")
     run.add_argument("--skip-sync", action="store_true")
@@ -125,17 +130,65 @@ def _check_abort_thresholds(run_id: str, counters: RunCounters, limits: RunLimit
         raise ToolError(ErrorCode.RUN_ABORT_THRESHOLD, msg)
 
 
-def _collect_records(args: argparse.Namespace, run_id: str, cfg: dict[str, Any], repo: Repository, counters: RunCounters) -> int:
+def _collect_records(
+    args: argparse.Namespace,
+    run_id: str,
+    cfg: dict[str, Any],
+    repo: Repository,
+    counters: RunCounters,
+    http_client: HttpClient,
+) -> int:
     repo.set_run_stage(run_id, "collect")
 
     if args.source == "csv":
         records = collect_from_csv(args.csv_path, args.region, args.industry, args.limit)
+    elif args.source == "osm":
+        records = collect_osm_public(
+            region=args.region,
+            industry=args.industry,
+            limit=args.limit,
+            http_client=http_client,
+            radius_km=int(args.radius_km or 20),
+        )
     else:
         records = seed_collect(args.region, args.industry, args.limit)
 
     allowed = cfg.get("compliance", {}).get("allowed_sources", [])
+    seen_keys: set[tuple[str, str | None, str]] = set()
+
     for record in records:
-        events = basic_record_checks(record, allowed)
+        validation = validate_lead_record(record)
+        if not validation.valid:
+            for code in validation.errors:
+                repo.insert_compliance_event(
+                    run_id=run_id,
+                    severity="error",
+                    rule_id=code,
+                    message="Lead record validation failed",
+                    context={"record": record.get("name"), "source": record.get("source_primary")},
+                )
+                counters.error_count += 1
+            continue
+
+        normalized = validation.normalized
+
+        dedupe_key = (
+            (normalized.get("name") or "").lower(),
+            (normalized.get("website_url") or "").lower() or None,
+            (normalized.get("city") or "").lower(),
+        )
+        if dedupe_key in seen_keys:
+            repo.insert_compliance_event(
+                run_id=run_id,
+                severity="info",
+                rule_id="DEDUP:IN_RUN_DUPLICATE",
+                message="Duplicate lead dropped within current run",
+                context={"name": normalized.get("name"), "city": normalized.get("city")},
+            )
+            continue
+        seen_keys.add(dedupe_key)
+
+        events = basic_record_checks(normalized, allowed)
         for ev in events:
             repo.insert_compliance_event(
                 run_id=run_id,
@@ -150,13 +203,13 @@ def _collect_records(args: argparse.Namespace, run_id: str, cfg: dict[str, Any],
         if any(ev["severity"] == "error" for ev in events):
             continue
 
-        company_id = repo.upsert_company(record)
+        company_id = repo.upsert_company(normalized)
         repo.insert_source_record(
             company_id=company_id,
             run_id=run_id,
-            source_name=record.get("source_primary", "unknown"),
-            source_url=record.get("source_ref"),
-            raw_payload=record,
+            source_name=normalized.get("source_primary", "unknown"),
+            source_url=normalized.get("source_ref"),
+            raw_payload=normalized,
         )
 
     companies = repo.get_companies_for_run(run_id)
@@ -270,8 +323,16 @@ def _sync_records(
     }
     example_lines: list[str] = []
 
+    seen_sync_keys: set[tuple[str, str]] = set()
+
     for lead in leads:
-        result = notion.upsert_lead(lead)
+        sync_key = ((lead.get("name") or "").strip().lower(), (lead.get("website_domain") or lead.get("website_url") or "").strip().lower())
+        if sync_key in seen_sync_keys:
+            result = {"status": "skipped", "reason": "in_run_duplicate_sync_key", "action": "dedupe"}
+        else:
+            seen_sync_keys.add(sync_key)
+            result = notion.upsert_lead(lead)
+
         status = result.get("status", "failed")
         action = result.get("action")
 
@@ -368,7 +429,7 @@ def _print_sync_result(run_id: str, sync_result: dict[str, Any]) -> None:
 def _run_pipeline(args: argparse.Namespace, cfg: dict[str, Any], repo: Repository, http_client: HttpClient) -> int:
     run_id, resumed = _resolve_run_for_execution(args, cfg, repo)
     run = repo.get_run(run_id) or {}
-
+    run_logger = RunLogger(run_id=run_id)
     # backfill args when resuming
     if resumed:
         args.region = args.region or run.get("region")
@@ -386,31 +447,52 @@ def _run_pipeline(args: argparse.Namespace, cfg: dict[str, Any], repo: Repositor
 
     started = time.monotonic()
     partial = False
+    run_logger.event("run", "start", {"resumed": resumed, "source": args.source, "limit": args.limit})
     try:
         if not resumed:
-            _collect_records(args, run_id, cfg, repo, counters)
+            _collect_records(args, run_id, cfg, repo, counters, http_client)
+            run_logger.event("collect", "done", {"count": counters.collected, "errors": counters.error_count})
+        else:
+            run_logger.event("collect", "skipped", {"reason": "resumed"})
         _check_abort_thresholds(run_id, counters, limits, repo)
 
         _audit_records(run_id, cfg, repo, counters, http_client)
+        run_logger.event(
+            "audit",
+            "done",
+            {
+                "audited": counters.audited,
+                "enriched": counters.enriched,
+                "errors": counters.error_count,
+                "network_errors": counters.network_error_count,
+            },
+        )
         _check_abort_thresholds(run_id, counters, limits, repo)
 
         _score_records(run_id, repo, counters)
+        run_logger.event("score", "done", {"scored": counters.scored})
         _check_abort_thresholds(run_id, counters, limits, repo)
 
         sync_result = {"counts": {"success": 0, "created": 0, "updated": 0, "failed": 0, "skipped": 0}, "examples": []}
         if not args.skip_sync:
             sync_result = _sync_records(run_id, args.min_class, cfg, repo, counters, http_client)
+            run_logger.event("sync", "done", sync_result.get("counts", {}))
             _check_abort_thresholds(run_id, counters, limits, repo)
+        else:
+            run_logger.event("sync", "skipped", {"reason": "--skip-sync"})
 
         _report(run_id, args.out, repo)
+        run_logger.event("report", "done", {"out": args.out})
 
         elapsed = time.monotonic() - started
         repo.append_run_note(run_id, f"elapsed_seconds={elapsed:.2f}")
 
         final_status = "partial" if sync_result["counts"].get("failed", 0) > 0 else "completed"
         repo.finish_run(run_id, status=final_status, notes=f"run finished in {elapsed:.2f}s")
+        run_logger.event("run", "finish", {"status": final_status, "elapsed_seconds": round(elapsed, 2)})
 
         print(f"Run abgeschlossen: {run_id} [{final_status}]")
+        print(f"Run-Log: {run_logger.path}")
         print(
             f"collect={counters.collected} audit={counters.audited} enriched={counters.enriched} "
             f"score={counters.scored} sync_success={counters.sync_success} errors={counters.error_count} "
@@ -433,11 +515,13 @@ def _run_pipeline(args: argparse.Namespace, cfg: dict[str, Any], repo: Repositor
             network_error_count=counters.network_error_count,
         )
         repo.finish_run(run_id, status="partial", notes=f"pipeline interrupted: {exc.code}")
+        run_logger.event("run", "partial", {"code": exc.code, "message": exc.message})
         print(f"Run partial: {run_id} - {exc.code} {exc.message}")
         return 2
     except Exception as exc:  # noqa: BLE001
         repo.append_run_note(run_id, f"UNHANDLED: {exc}")
         repo.finish_run(run_id, status="failed", notes=str(exc))
+        run_logger.event("run", "failed", {"error": str(exc)})
         print(f"Run fehlgeschlagen: {run_id} - {exc}")
         return 1
     finally:
@@ -462,7 +546,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "collect":
         run_id = repo.create_run(args.region, args.industry, args.limit)
         counters = RunCounters()
-        _collect_records(args, run_id, cfg, repo, counters)
+        _collect_records(args, run_id, cfg, repo, counters, http_client)
         repo.finish_run(run_id, status="completed", notes="collect completed")
         print(f"Run erstellt: {run_id}")
         print(f"Collect abgeschlossen. Leads: {counters.collected}")

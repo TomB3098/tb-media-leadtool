@@ -14,7 +14,7 @@ def _fallback_config() -> dict[str, Any]:
         "pagespeed": {"strategy": "mobile"},
         "notion": {"enabled": True, "api_base_url": "https://api.notion.com/v1"},
         "compliance": {
-            "allowed_sources": ["manual_public_csv", "seed_public_demo"],
+            "allowed_sources": ["manual_public_csv", "seed_public_demo", "osm_overpass_public"],
             "max_requests_per_minute": 30,
             "disallow_private_emails": True,
         },
