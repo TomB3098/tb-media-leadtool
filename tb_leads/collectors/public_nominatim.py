@@ -62,9 +62,6 @@ def collect_nominatim_public(
         email = _norm(extratags.get("email") or extratags.get("contact:email"))
         phone = _norm(extratags.get("phone") or extratags.get("contact:phone"))
 
-        if not any([website, email, phone]):
-            continue
-
         address = row.get("address") or {}
         city = _norm(address.get("city") or address.get("town") or address.get("village") or region)
         street = _norm(address.get("road"))
@@ -76,6 +73,11 @@ def collect_nominatim_public(
             address_line = f"{street} {house}, {postcode} {city}"
         elif street and house and city:
             address_line = f"{street} {house}, {city}"
+        elif postcode and city:
+            address_line = f"{postcode} {city}"
+
+        if not any([website, email, phone, address_line]):
+            continue
 
         key = (name.lower(), (website or "").lower() or None)
         if key in seen:
