@@ -216,6 +216,16 @@ sqlite3 tb_leads.db "SELECT run_id,severity,rule_id,message,created_at FROM comp
 2. Bei Source-Timeouts: Radius/Limit reduzieren, ggf. von `osm` auf `nominatim` wechseln.
 3. Bei erhöhten Fehlerquoten: `TB_LEADS_MAX_REQUESTS_PER_MINUTE` senken und Run erneut starten.
 
+### 9.4 Go-Live Betriebsanweisung (phasenweise)
+1. **Phase A (Validation):** `limit=1..3`, `--min-score 0`, enges Monitoring.
+2. **Phase B (Stabilisierung):** `limit=5..10`, `--min-score 50`, `filters.require_website_for_sync=true`.
+3. **Phase C (Regelbetrieb):** stündliche Cron-Läufe mit konservativen Netzparametern.
+
+Empfohlene Startkriterien für Go:
+- Run-Status überwiegend `completed`/`partial` (kein wiederholtes `failed`).
+- Notion-Sync ohne Dubletten (idempotente Updates sichtbar).
+- Netzwerkfehler unter Kontrolle durch Retry/Backoff/Throttle.
+
 ## 10. Security / Compliance-Hinweise
 
 - Nur öffentliche B2B-Daten verarbeiten.
