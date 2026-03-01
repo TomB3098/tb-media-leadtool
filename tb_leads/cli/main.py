@@ -240,11 +240,18 @@ def _audit_records(
     companies = repo.get_companies_for_run(run_id)
     strategy = cfg.get("pagespeed", {}).get("strategy", "mobile")
     key = cfg.get("page_speed_api_key")
+    enrichment_max_pages = int(cfg.get("enrichment", {}).get("max_pages", 4))
 
     repo.clear_run_audits(run_id)
     enriched_count = 0
     for company in companies:
-        audit = run_audit(company.website_url, key, http_client=http_client, strategy=strategy)
+        audit = run_audit(
+            company.website_url,
+            key,
+            http_client=http_client,
+            strategy=strategy,
+            enrichment_max_pages=enrichment_max_pages,
+        )
         repo.insert_website_audit(company.id, run_id, audit)
 
         email = audit.get("enriched_email")

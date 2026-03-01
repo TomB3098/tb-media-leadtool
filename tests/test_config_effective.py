@@ -12,6 +12,7 @@ class ConfigEffectiveTests(unittest.TestCase):
         os.environ["TB_LEADS_MAX_NETWORK_ERRORS_PER_RUN"] = "4"
         os.environ["TB_LEADS_TIMEOUT_SECONDS"] = "6"
         os.environ["TB_LEADS_MAX_RETRIES"] = "2"
+        os.environ["TB_LEADS_ENRICHMENT_MAX_PAGES"] = "2"
         try:
             cfg = load_config()
             self.assertEqual(cfg["compliance"]["max_requests_per_minute"], 77)
@@ -19,12 +20,14 @@ class ConfigEffectiveTests(unittest.TestCase):
             self.assertEqual(cfg["run"]["max_network_errors_per_run"], 4)
             self.assertEqual(cfg["network"]["timeout_seconds"], 6.0)
             self.assertEqual(cfg["network"]["max_retries"], 2)
+            self.assertEqual(cfg["enrichment"]["max_pages"], 2)
         finally:
             os.environ.pop("TB_LEADS_MAX_REQUESTS_PER_MINUTE", None)
             os.environ.pop("TB_LEADS_MAX_ERRORS_PER_RUN", None)
             os.environ.pop("TB_LEADS_MAX_NETWORK_ERRORS_PER_RUN", None)
             os.environ.pop("TB_LEADS_TIMEOUT_SECONDS", None)
             os.environ.pop("TB_LEADS_MAX_RETRIES", None)
+            os.environ.pop("TB_LEADS_ENRICHMENT_MAX_PAGES", None)
 
     def test_http_client_uses_configured_rate_limit(self):
         cfg = {

@@ -15,6 +15,7 @@ def run_audit(
     page_speed_api_key: str | None,
     http_client: HttpClient,
     strategy: str = "mobile",
+    enrichment_max_pages: int = 4,
 ) -> dict[str, Any]:
     probe = probe_website(url=website_url, http_client=http_client)
     html = probe.get("html", "")
@@ -29,7 +30,11 @@ def run_audit(
         response_time_ms=probe.get("response_time_ms"),
     )
 
-    enrichment = enrich_contact_data(website_url, http_client=http_client)
+    enrichment = enrich_contact_data(
+        website_url,
+        http_client=http_client,
+        max_pages=max(1, int(enrichment_max_pages)),
+    )
 
     # Tech health rough aggregation 0..100
     tech_health = int(

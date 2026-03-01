@@ -34,6 +34,9 @@ def _fallback_config() -> dict[str, Any]:
             "require_contact_for_sync": False,
             "require_email_for_sync": False,
         },
+        "enrichment": {
+            "max_pages": 4,
+        },
     }
 
 
@@ -86,6 +89,9 @@ def load_config(path: str | None = None) -> dict[str, Any]:
         cfg.setdefault("network", {})["backoff_max_seconds"] = float(os.getenv("TB_LEADS_BACKOFF_MAX_SECONDS", "4.0"))
     if os.getenv("TB_LEADS_JITTER_SECONDS"):
         cfg.setdefault("network", {})["jitter_seconds"] = float(os.getenv("TB_LEADS_JITTER_SECONDS", "0.2"))
+
+    if os.getenv("TB_LEADS_ENRICHMENT_MAX_PAGES"):
+        cfg.setdefault("enrichment", {})["max_pages"] = int(os.getenv("TB_LEADS_ENRICHMENT_MAX_PAGES", "4"))
 
     return cfg
 

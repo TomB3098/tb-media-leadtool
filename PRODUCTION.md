@@ -41,6 +41,7 @@ Dieses Dokument beschreibt den produktionsnahen Betrieb des `tb-leads` CLI-Tools
 - `TB_LEADS_BACKOFF_BASE_SECONDS`
 - `TB_LEADS_BACKOFF_MAX_SECONDS`
 - `TB_LEADS_JITTER_SECONDS`
+- `TB_LEADS_ENRICHMENT_MAX_PAGES`
 
 ---
 
@@ -65,6 +66,9 @@ Dieses Dokument beschreibt den produktionsnahen Betrieb des `tb-leads` CLI-Tools
 - `filters.require_website_for_sync`
 - `filters.require_contact_for_sync`
 - `filters.require_email_for_sync`
+
+## 4.5 Enrichment-Laststeuerung
+- `enrichment.max_pages` (sowie ENV `TB_LEADS_ENRICHMENT_MAX_PAGES`)
 
 Empfehlung Startwerte:
 - `max_requests_per_minute`: 20–40

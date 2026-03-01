@@ -55,6 +55,7 @@ Optional über `config/default.yaml` und ENV-Variablen:
 - `TB_LEADS_BACKOFF_BASE_SECONDS`
 - `TB_LEADS_BACKOFF_MAX_SECONDS`
 - `TB_LEADS_JITTER_SECONDS`
+- `TB_LEADS_ENRICHMENT_MAX_PAGES`
 
 Wichtige Sync-Steuerung über Config:
 - `min_score_for_sync` (Score-Schwelle für Sync)

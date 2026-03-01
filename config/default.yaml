@@ -34,3 +34,6 @@ filters:
   require_website_for_sync: false
   require_contact_for_sync: false
   require_email_for_sync: false
+
+enrichment:
+  max_pages: 4
