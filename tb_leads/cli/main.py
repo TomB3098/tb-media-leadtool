@@ -9,6 +9,7 @@ from tb_leads.audit.service import run_audit
 from tb_leads.collectors.manual_public_csv import collect_from_csv
 from tb_leads.collectors.seed_public_demo import collect as seed_collect
 from tb_leads.collectors.public_osm import collect_osm_public
+from tb_leads.collectors.public_nominatim import collect_nominatim_public
 from tb_leads.compliance.checker import basic_record_checks
 from tb_leads.config.loader import load_config
 from tb_leads.db.repository import Repository
@@ -56,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--region", required=True)
     collect.add_argument("--industry", required=True)
     collect.add_argument("--limit", type=int, default=30)
-    collect.add_argument("--source", choices=["seed", "csv", "osm"], default="seed")
+    collect.add_argument("--source", choices=["seed", "csv", "osm", "nominatim"], default="seed")
     collect.add_argument("--csv-path", default="examples/public_companies_sample.csv")
     collect.add_argument("--radius-km", type=int, default=20)
 
@@ -78,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--region")
     run.add_argument("--industry")
     run.add_argument("--limit", type=int)
-    run.add_argument("--source", choices=["seed", "csv", "osm"], default="seed")
+    run.add_argument("--source", choices=["seed", "csv", "osm", "nominatim"], default="seed")
     run.add_argument("--csv-path", default="examples/public_companies_sample.csv")
     run.add_argument("--radius-km", type=int, default=20)
     run.add_argument("--min-class", choices=["A", "B", "C"], default="B")
@@ -149,6 +150,13 @@ def _collect_records(
             limit=args.limit,
             http_client=http_client,
             radius_km=int(args.radius_km or 20),
+        )
+    elif args.source == "nominatim":
+        records = collect_nominatim_public(
+            region=args.region,
+            industry=args.industry,
+            limit=args.limit,
+            http_client=http_client,
         )
     else:
         records = seed_collect(args.region, args.industry, args.limit)

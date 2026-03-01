@@ -93,6 +93,17 @@ python -m tb_leads.cli.main run \
   --out reports
 ```
 
+## 5.3b End-to-End Lauf (echte öffentliche Quelle: Nominatim)
+```bash
+python -m tb_leads.cli.main run \
+  --region "Krefeld" \
+  --industry "Dienstleister" \
+  --limit 10 \
+  --source nominatim \
+  --min-class B \
+  --out reports
+```
+
 ## 5.4 Resume nach Teilfehlern
 ```bash
 python -m tb_leads.cli.main run --resume-latest --min-class B --out reports

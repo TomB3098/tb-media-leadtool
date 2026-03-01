@@ -31,6 +31,8 @@ Das Tool sammelt öffentlich verfügbare B2B-Daten, führt einen technischen Web
 python -m tb_leads.cli.main init-db
 # reale öffentliche Quelle (OSM)
 python -m tb_leads.cli.main run --region "Krefeld" --industry "Dienstleister" --limit 10 --source osm --radius-km 20
+# alternative Public-Quelle
+python -m tb_leads.cli.main run --region "Krefeld" --industry "Dienstleister" --limit 10 --source nominatim
 # oder CSV-Quelle
 python -m tb_leads.cli.main run --region "Krefeld" --industry "Arztpraxen" --limit 15 --source csv --csv-path examples/public_companies_sample.csv
 python -m tb_leads.cli.main report --run-id <RUN_ID> --out reports
