@@ -69,7 +69,7 @@ Empfehlung Startwerte:
 python -m tb_leads.cli.main init-db
 ```
 
-## 5.2 End-to-End Lauf
+## 5.2 End-to-End Lauf (CSV-Quelle)
 ```bash
 python -m tb_leads.cli.main run \
   --region "Krefeld" \
@@ -81,7 +81,19 @@ python -m tb_leads.cli.main run \
   --out reports
 ```
 
-## 5.3 Resume nach Teilfehlern
+## 5.3 End-to-End Lauf (echte öffentliche Quelle: OSM)
+```bash
+python -m tb_leads.cli.main run \
+  --region "Krefeld" \
+  --industry "Dienstleister" \
+  --limit 10 \
+  --source osm \
+  --radius-km 20 \
+  --min-class B \
+  --out reports
+```
+
+## 5.4 Resume nach Teilfehlern
 ```bash
 python -m tb_leads.cli.main run --resume-latest --min-class B --out reports
 # oder explizit
@@ -98,6 +110,7 @@ python -m tb_leads.cli.main run --resume-run-id <RUN_ID> --min-class B --out rep
 - `network_error_count`
 - `collected_count`, `scored_count`, `synced_count`
 - Notion-Sync-Verteilung (`created/updated/failed/skipped`)
+- JSONL-Runlog pro Lauf: `logs/run-<RUN_ID>.jsonl`
 
 ## 6.2 SQL-Checks
 ```sql
@@ -128,6 +141,11 @@ Automatisch abgefedert durch:
 
 Bei Überschreitung von Abbruchgrenzen wird der Run als `partial` beendet.
 
+### Fallback-Strategien
+- Collector-Fallback: Für kritische Kampagnen OSM + CSV kombinieren (CSV als Backup-Quelle).
+- Sync-Fallback: Bei Notion-Ausfall mit `--skip-sync` laufen lassen und später `tb-leads sync --run-id ...` nachziehen.
+- Resume-Fallback: `--resume-latest` oder `--resume-run-id` nutzen, statt den gesamten Run neu zu starten.
+
 ## 7.2 Notion-spezifische Fehler
 - `NOTION_AUTH` (401)
 - `NOTION_FORBIDDEN` (403)
@@ -140,10 +158,11 @@ Diese Fehler werden als strukturierte Fehlercodes in Sync-Resultat und Run-Notes
 
 ## 8. Known Limits
 
-1. Quellenadapter sind aktuell bewusst konservativ (Seed/CSV + website-basierte Audits).
+1. OSM/Nominatim/Overpass haben faire Nutzungsgrenzen; bei höheren Volumina ist ein Mirror/paid data source empfehlenswert.
 2. Adress-Parsing ist heuristisch — für Spezialfälle kann manuelle Nachprüfung nötig sein.
 3. Notion-Property-Mapping ist schema-adaptiv, setzt aber vorhandene geeignete Felder im Ziel-CRM voraus.
 4. SQLite ist für Single-Worker-Betrieb ausgelegt; für stark parallelen Betrieb später auf Postgres migrieren.
+5. Live-Webseiten können langsam oder blockierend reagieren; konservative Limits + kleine Batches sind Pflicht.
 
 ---
 

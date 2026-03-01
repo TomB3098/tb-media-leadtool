@@ -29,7 +29,10 @@ Das Tool sammelt öffentlich verfügbare B2B-Daten, führt einen technischen Web
 
 ```bash
 python -m tb_leads.cli.main init-db
-python -m tb_leads.cli.main run --region "Krefeld" --industry "Arztpraxen" --limit 15
+# reale öffentliche Quelle (OSM)
+python -m tb_leads.cli.main run --region "Krefeld" --industry "Dienstleister" --limit 10 --source osm --radius-km 20
+# oder CSV-Quelle
+python -m tb_leads.cli.main run --region "Krefeld" --industry "Arztpraxen" --limit 15 --source csv --csv-path examples/public_companies_sample.csv
 python -m tb_leads.cli.main report --run-id <RUN_ID> --out reports
 ```
 
@@ -55,4 +58,4 @@ Optional über `config/default.yaml` und ENV-Variablen:
 
 ## Status
 
-MVP-Basis ist lauffähig; produktive Quellenadapter/Outreach-Automation werden iterativ ergänzt.
+Production-Hardening läuft in Teilphasen; OSM-Collector + resilientere Pipeline sind integriert. Weitere Quellenadapter folgen iterativ.
