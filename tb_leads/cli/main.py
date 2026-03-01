@@ -69,7 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync = sub.add_parser("sync", help="Synchronisiert Leads nach Notion")
     sync.add_argument("--run-id", required=True)
-    sync.add_argument("--min-class", choices=["A", "B", "C"], default="B")
+    sync.add_argument("--min-class", choices=["A", "B", "C"], default=None)
+    sync.add_argument("--min-score", type=int, default=None)
 
     report = sub.add_parser("report", help="Exportiert CSV + Summary")
     report.add_argument("--run-id", required=True)
@@ -82,7 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--source", choices=["seed", "csv", "osm", "nominatim"], default="seed")
     run.add_argument("--csv-path", default="examples/public_companies_sample.csv")
     run.add_argument("--radius-km", type=int, default=20)
-    run.add_argument("--min-class", choices=["A", "B", "C"], default="B")
+    run.add_argument("--min-class", choices=["A", "B", "C"], default=None)
+    run.add_argument("--min-score", type=int, default=None)
     run.add_argument("--out", default="reports")
     run.add_argument("--skip-sync", action="store_true")
     run.add_argument("--resume-run-id")
@@ -304,7 +306,8 @@ def _score_records(run_id: str, repo: Repository, counters: RunCounters) -> int:
 
 def _sync_records(
     run_id: str,
-    min_class: str,
+    min_class: str | None,
+    min_score: int | None,
     cfg: dict[str, Any],
     repo: Repository,
     counters: RunCounters,
@@ -312,7 +315,30 @@ def _sync_records(
 ) -> dict[str, Any]:
     repo.set_run_stage(run_id, "sync")
 
-    leads = repo.get_scored_leads_for_run(run_id, min_class=min_class)
+    effective_min_score = int(min_score if min_score is not None else cfg.get("min_score_for_sync", 0))
+    if min_class:
+        effective_min_class = min_class
+    else:
+        if effective_min_score >= 80:
+            effective_min_class = "A"
+        elif effective_min_score >= 50:
+            effective_min_class = "B"
+        else:
+            effective_min_class = "C"
+
+    leads = repo.get_scored_leads_for_run(run_id, min_class=effective_min_class)
+
+    if effective_min_score > 0:
+        leads = [lead for lead in leads if int(lead.get("score_total") or 0) >= effective_min_score]
+
+    filters = cfg.get("filters", {})
+    if filters.get("require_website_for_sync"):
+        leads = [lead for lead in leads if lead.get("website_url")]
+    if filters.get("require_contact_for_sync"):
+        leads = [lead for lead in leads if lead.get("email") or lead.get("phone")]
+    if filters.get("require_email_for_sync"):
+        leads = [lead for lead in leads if lead.get("email")]
+
     notion = NotionClient(
         token=cfg.get("notion_token"),
         database_id=cfg.get("notion_db_id"),
@@ -483,7 +509,7 @@ def _run_pipeline(args: argparse.Namespace, cfg: dict[str, Any], repo: Repositor
 
         sync_result = {"counts": {"success": 0, "created": 0, "updated": 0, "failed": 0, "skipped": 0}, "examples": []}
         if not args.skip_sync:
-            sync_result = _sync_records(run_id, args.min_class, cfg, repo, counters, http_client)
+            sync_result = _sync_records(run_id, args.min_class, args.min_score, cfg, repo, counters, http_client)
             run_logger.event("sync", "done", sync_result.get("counts", {}))
             _check_abort_thresholds(run_id, counters, limits, repo)
         else:
@@ -578,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "sync":
         counters = RunCounters()
-        sync_result = _sync_records(args.run_id, args.min_class, cfg, repo, counters, http_client)
+        sync_result = _sync_records(args.run_id, args.min_class, args.min_score, cfg, repo, counters, http_client)
         _print_sync_result(args.run_id, sync_result)
         return 0
 

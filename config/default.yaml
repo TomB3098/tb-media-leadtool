@@ -29,3 +29,8 @@ network:
 run:
   max_errors_per_run: 50
   max_network_errors_per_run: 20
+
+filters:
+  require_website_for_sync: false
+  require_contact_for_sync: false
+  require_email_for_sync: false

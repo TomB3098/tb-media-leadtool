@@ -29,6 +29,11 @@ def _fallback_config() -> dict[str, Any]:
             "max_errors_per_run": 50,
             "max_network_errors_per_run": 20,
         },
+        "filters": {
+            "require_website_for_sync": False,
+            "require_contact_for_sync": False,
+            "require_email_for_sync": False,
+        },
     }
 
 
@@ -70,6 +75,17 @@ def load_config(path: str | None = None) -> dict[str, Any]:
         cfg.setdefault("run", {})["max_errors_per_run"] = int(os.getenv("TB_LEADS_MAX_ERRORS_PER_RUN", "50"))
     if os.getenv("TB_LEADS_MAX_NETWORK_ERRORS_PER_RUN"):
         cfg.setdefault("run", {})["max_network_errors_per_run"] = int(os.getenv("TB_LEADS_MAX_NETWORK_ERRORS_PER_RUN", "20"))
+
+    if os.getenv("TB_LEADS_TIMEOUT_SECONDS"):
+        cfg.setdefault("network", {})["timeout_seconds"] = float(os.getenv("TB_LEADS_TIMEOUT_SECONDS", "10"))
+    if os.getenv("TB_LEADS_MAX_RETRIES"):
+        cfg.setdefault("network", {})["max_retries"] = int(os.getenv("TB_LEADS_MAX_RETRIES", "3"))
+    if os.getenv("TB_LEADS_BACKOFF_BASE_SECONDS"):
+        cfg.setdefault("network", {})["backoff_base_seconds"] = float(os.getenv("TB_LEADS_BACKOFF_BASE_SECONDS", "0.35"))
+    if os.getenv("TB_LEADS_BACKOFF_MAX_SECONDS"):
+        cfg.setdefault("network", {})["backoff_max_seconds"] = float(os.getenv("TB_LEADS_BACKOFF_MAX_SECONDS", "4.0"))
+    if os.getenv("TB_LEADS_JITTER_SECONDS"):
+        cfg.setdefault("network", {})["jitter_seconds"] = float(os.getenv("TB_LEADS_JITTER_SECONDS", "0.2"))
 
     return cfg
 

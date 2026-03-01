@@ -12,6 +12,7 @@ from tb_leads.utils.throttle import RateLimiter
 class _NotionHandler(BaseHTTPRequestHandler):
     pages: list[dict] = []
     create_calls = 0
+    patch_calls = 0
 
     def _json(self, code: int, payload: dict):
         body = json.dumps(payload).encode("utf-8")
@@ -75,9 +76,15 @@ class _NotionHandler(BaseHTTPRequestHandler):
 
     def do_PATCH(self):  # noqa: N802
         if self.path.startswith("/v1/pages/"):
+            type(self).patch_calls += 1
             page_id = self.path.split("/")[-1]
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+
+            # first patch returns 503 to validate retry/backoff path
+            if type(self).patch_calls == 1:
+                return self._json(503, {"error": "temporary server issue"})
+
             for page in type(self).pages:
                 if page["id"] == page_id:
                     page["raw"]["properties"] = payload.get("properties", page["raw"]["properties"])
@@ -94,6 +101,7 @@ class NotionMockIntegrationTests(unittest.TestCase):
     def setUp(self):
         _NotionHandler.pages = []
         _NotionHandler.create_calls = 0
+        _NotionHandler.patch_calls = 0
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _NotionHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -136,6 +144,7 @@ class NotionMockIntegrationTests(unittest.TestCase):
         self.assertEqual(second["status"], "success")
         self.assertEqual(second["action"], "updated")
         self.assertEqual(len(_NotionHandler.pages), 1)
+        self.assertGreaterEqual(_NotionHandler.patch_calls, 2)
 
 
 if __name__ == "__main__":

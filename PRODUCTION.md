@@ -36,6 +36,11 @@ Dieses Dokument beschreibt den produktionsnahen Betrieb des `tb-leads` CLI-Tools
 - `TB_LEADS_MAX_REQUESTS_PER_MINUTE`
 - `TB_LEADS_MAX_ERRORS_PER_RUN`
 - `TB_LEADS_MAX_NETWORK_ERRORS_PER_RUN`
+- `TB_LEADS_TIMEOUT_SECONDS`
+- `TB_LEADS_MAX_RETRIES`
+- `TB_LEADS_BACKOFF_BASE_SECONDS`
+- `TB_LEADS_BACKOFF_MAX_SECONDS`
+- `TB_LEADS_JITTER_SECONDS`
 
 ---
 
@@ -55,10 +60,17 @@ Dieses Dokument beschreibt den produktionsnahen Betrieb des `tb-leads` CLI-Tools
 - `run.max_errors_per_run`
 - `run.max_network_errors_per_run`
 
+## 4.4 Sync-Schwelle & Filter
+- `min_score_for_sync`
+- `filters.require_website_for_sync`
+- `filters.require_contact_for_sync`
+- `filters.require_email_for_sync`
+
 Empfehlung Startwerte:
 - `max_requests_per_minute`: 20–40
 - `timeout_seconds`: 8–12
 - `max_retries`: 3
+- `min_score_for_sync`: 60–70
 
 ---
 
@@ -177,7 +189,30 @@ Diese Fehler werden als strukturierte Fehlercodes in Sync-Resultat und Run-Notes
 
 ---
 
-## 9. Security / Compliance-Hinweise
+## 9. Betriebsmodus (Cron + Monitoring)
+
+### 9.1 Beispiel-Cron (stündlich, kleiner Batch)
+```cron
+15 * * * * cd /opt/tb-media-leadtool && /usr/bin/python3 -m tb_leads.cli.main run --region "Krefeld" --industry "Dienstleister" --limit 8 --source osm --radius-km 12 --min-class B --out reports >> /var/log/tb-leads.log 2>&1
+```
+
+### 9.2 Monitoring-Quickchecks
+- letzte Runs prüfen:
+```bash
+sqlite3 tb_leads.db "SELECT id,status,collected_count,scored_count,synced_count,error_count,network_error_count,started_at FROM runs ORDER BY started_at DESC LIMIT 10;"
+```
+- Compliance-Events prüfen:
+```bash
+sqlite3 tb_leads.db "SELECT run_id,severity,rule_id,message,created_at FROM compliance_events ORDER BY created_at DESC LIMIT 30;"
+```
+- JSONL-Laufprotokolle: `logs/run-<RUN_ID>.jsonl`
+
+### 9.3 Operativer Fallback
+1. Bei Notion-Ausfall: `--skip-sync` verwenden und später gezielt `sync --run-id ...`.
+2. Bei Source-Timeouts: Radius/Limit reduzieren, ggf. von `osm` auf `nominatim` wechseln.
+3. Bei erhöhten Fehlerquoten: `TB_LEADS_MAX_REQUESTS_PER_MINUTE` senken und Run erneut starten.
+
+## 10. Security / Compliance-Hinweise
 
 - Nur öffentliche B2B-Daten verarbeiten.
 - Keine privaten/sensiblen Daten sammeln.
